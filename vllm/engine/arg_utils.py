@@ -45,6 +45,7 @@ from vllm.config import (
     KVTransferConfig,
     LoadConfig,
     LoRAConfig,
+    MemoryProfilerConfig,
     ModelConfig,
     MultiModalConfig,
     ObservabilityConfig,
@@ -564,6 +565,9 @@ class EngineArgs:
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
 
     profiler_config: ProfilerConfig = get_field(VllmConfig, "profiler_config")
+    memory_profiler_config: MemoryProfilerConfig = get_field(
+        VllmConfig, "memory_profiler_config"
+    )
 
     kv_transfer_config: KVTransferConfig | None = None
     kv_events_config: KVEventsConfig | None = None
@@ -632,6 +636,10 @@ class EngineArgs:
         if isinstance(self.weight_transfer_config, dict):
             self.weight_transfer_config = WeightTransferConfig(
                 **self.weight_transfer_config
+            )
+        if isinstance(self.memory_profiler_config, dict):
+            self.memory_profiler_config = MemoryProfilerConfig(
+                **self.memory_profiler_config
             )
         # Setup plugins
         from vllm.plugins import load_general_plugins
@@ -1288,6 +1296,9 @@ class EngineArgs:
         )
         vllm_group.add_argument("--profiler-config", **vllm_kwargs["profiler_config"])
         vllm_group.add_argument(
+            "--memory-profiler-config", **vllm_kwargs["memory_profiler_config"]
+        )
+        vllm_group.add_argument(
             "--optimization-level", **vllm_kwargs["optimization_level"]
         )
         vllm_group.add_argument("--performance-mode", **vllm_kwargs["performance_mode"])
@@ -1939,6 +1950,7 @@ class EngineArgs:
             kv_events_config=self.kv_events_config,
             ec_transfer_config=self.ec_transfer_config,
             profiler_config=self.profiler_config,
+            memory_profiler_config=self.memory_profiler_config,
             additional_config=self.additional_config,
             optimization_level=self.optimization_level,
             performance_mode=self.performance_mode,

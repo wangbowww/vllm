@@ -16,6 +16,7 @@ from vllm.config.kv_events import KVEventsConfig
 from vllm.config.kv_transfer import KVTransferConfig
 from vllm.config.load import LoadConfig
 from vllm.config.lora import LoRAConfig
+from vllm.config.memory_profiler import MemoryProfilerConfig
 from vllm.config.model import (
     ModelConfig,
     iter_architecture_defaults,
@@ -82,6 +83,8 @@ __all__ = [
     "LoadConfig",
     # From vllm.config.lora
     "LoRAConfig",
+    # From vllm.config.memory_profiler
+    "MemoryProfilerConfig",
     # From vllm.config.model
     "ModelConfig",
     "iter_architecture_defaults",

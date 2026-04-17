@@ -35,6 +35,7 @@ from .kv_events import KVEventsConfig
 from .kv_transfer import KVTransferConfig
 from .load import LoadConfig
 from .lora import LoRAConfig
+from .memory_profiler import MemoryProfilerConfig
 from .model import ModelConfig
 from .observability import ObservabilityConfig
 from .offload import OffloadConfig
@@ -296,6 +297,10 @@ class VllmConfig:
     """
     profiler_config: ProfilerConfig = Field(default_factory=ProfilerConfig)
     """Profiling configuration."""
+    memory_profiler_config: MemoryProfilerConfig = Field(
+        default_factory=MemoryProfilerConfig
+    )
+    """Live GPU memory profiler configuration."""
     kv_transfer_config: KVTransferConfig | None = None
     """The configurations for distributed KV cache transfer."""
     kv_events_config: KVEventsConfig | None = None
@@ -402,6 +407,10 @@ class VllmConfig:
             vllm_factors.append(self.structured_outputs_config.compute_hash())
         if self.profiler_config:
             vllm_factors.append(self.profiler_config.compute_hash())
+        else:
+            vllm_factors.append("None")
+        if self.memory_profiler_config:
+            vllm_factors.append(self.memory_profiler_config.compute_hash())
         else:
             vllm_factors.append("None")
         vllm_factors.append(self.observability_config.compute_hash())
