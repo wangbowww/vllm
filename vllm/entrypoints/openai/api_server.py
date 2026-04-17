@@ -195,6 +195,10 @@ def build_app(
 
     register_models_api_router(app)
 
+    from vllm.memory_profiling.routes import register_memory_profiler_routes
+
+    register_memory_profiler_routes(app, args)
+
     from vllm.entrypoints.sagemaker.api_router import (
         attach_router as register_sagemaker_api_router,
     )
@@ -350,6 +354,10 @@ async def init_app_state(
     state.vllm_config = vllm_config
     state.args = args
     resolved_chat_template = load_chat_template(args.chat_template)
+
+    from vllm.memory_profiling.routes import init_memory_profiler_state
+
+    init_memory_profiler_state(engine_client, state, args, supported_tasks)
 
     # Merge default_mm_loras into the static lora_modules
     default_mm_loras = (

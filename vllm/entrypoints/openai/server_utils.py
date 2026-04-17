@@ -443,6 +443,9 @@ _running_tasks: set[asyncio.Task] = set()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
+        memory_profiler_service = getattr(app.state, "memory_profiler_service", None)
+        if memory_profiler_service is not None:
+            memory_profiler_service.start()
         if app.state.log_stats:
             engine_client: EngineClient = app.state.engine_client
 
@@ -465,6 +468,8 @@ async def lifespan(app: FastAPI):
         finally:
             if task is not None:
                 task.cancel()
+            if memory_profiler_service is not None:
+                await memory_profiler_service.stop()
     finally:
         # Ensure app state including engine ref is gc'd
         del app.state
