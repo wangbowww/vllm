@@ -947,6 +947,9 @@ class AsyncLLM(EngineClient):
             method, timeout, args, kwargs
         )
 
+    async def get_memory_profiler_engine_state(self) -> dict[str, Any]:
+        return await self.engine_core.call_utility_async("get_memory_profiler_state")
+
     async def wait_for_requests_to_drain(self, drain_timeout: int = 300):
         """Wait for all requests to be drained."""
         start_time = time.time()
