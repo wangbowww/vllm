@@ -22,6 +22,7 @@ from vllm.forward_context import (
     is_forward_context_available,
 )
 from vllm.logger import init_logger
+from vllm.memory_profiling.runtime import record_cuda_graph_capture
 from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import current_stream, weak_ref_tensors
@@ -272,6 +273,7 @@ class CUDAGraphWrapper:
                 )
             # validate that cudagraph capturing is legal at this point.
             validate_cudagraph_capturing_enabled()
+            mem_before_capture = torch.cuda.mem_get_info()[0]
 
             input_addresses = [
                 x.data_ptr() for x in args if isinstance(x, torch.Tensor)
@@ -329,6 +331,12 @@ class CUDAGraphWrapper:
             entry.cudagraph = cudagraph
 
             compilation_counter.num_cudagraph_captured += 1
+            mem_after_capture = torch.cuda.mem_get_info()[0]
+            record_cuda_graph_capture(
+                max(mem_before_capture - mem_after_capture, 0),
+                batch_descriptor=batch_descriptor,
+                runtime_mode=str(cudagraph_runtime_mode),
+            )
 
             # important: we need to return the output, rather than
             # the weak ref of the output, so that pytorch can correctly
