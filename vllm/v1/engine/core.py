@@ -413,7 +413,6 @@ class EngineCore:
         batch_id = self.scheduler.get_schedule_iteration()
         scheduler_output.request_timeline_batch_id = batch_id
         scheduled_at = timeline_now()
-        scheduler_output.request_timeline_scheduled_at = scheduled_at
         for req_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
             stage = "prefill" if num_tokens > 1 else "decode"
             metadata: dict[str, Any] = {
@@ -1267,12 +1266,6 @@ class EngineCoreProc(EngineCore):
             req, request_wave = request
             if self._reject_add_in_shutdown(req):
                 return
-            # get req from EC queue
-            request_timeline_store.add_event(
-                request_id=req.request_id,
-                event_name="ECQueueGet",
-                start_time=timeline_now()
-            )
             self.add_request(req, request_wave)
         elif request_type == EngineCoreRequestType.ABORT:
             self.abort_requests(request)
@@ -1457,12 +1450,6 @@ class EngineCoreProc(EngineCore):
 
                     # Push to input queue for core busy loop.
                     self.input_queue.put_nowait((request_type, request))
-                    # push the req into EC queue
-                    request_timeline_store.add_event(
-                        request_id=request.request_id,
-                        event_name="ECQueued",
-                        start_time=timeline_now()
-                    )
 
     def process_output_sockets(
         self,

@@ -69,6 +69,8 @@ from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.parser import ParserManager
 from vllm.reasoning import ReasoningParser
 from vllm.renderers import ChatParams
+from vllm.request_timeline import now as timeline_now
+from vllm.request_timeline import request_timeline_store
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
@@ -220,6 +222,7 @@ class OpenAIServingChat(OpenAIServing):
         for the API specification. This API mimics the OpenAI
         Chat Completion API.
         """
+        request_start_time = timeline_now()
         # Streaming response
         tokenizer = self.renderer.tokenizer
         assert tokenizer is not None
@@ -265,6 +268,23 @@ class OpenAIServingChat(OpenAIServing):
             # have unique request ids.
             sub_request_id = (
                 request_id if len(engine_prompts) == 1 else f"{request_id}_{i}"
+            )
+            input_tokens = len(prompt_token_ids or [])
+            prompt_text = self._extract_prompt_text(engine_prompt)
+            # add the request to timeline
+            request_timeline_store.add_request(
+                sub_request_id,
+                timestamp=request_start_time,
+                prompt=prompt_text,
+                input_tokens=input_tokens,
+                status="created",
+            )
+            # record preprocess
+            request_timeline_store.add_event(
+                request_id=sub_request_id,
+                event_name="preprocess",
+                start_time=request_start_time,
+                end_time=timeline_now(),
             )
 
             max_tokens = get_max_tokens(
@@ -739,6 +759,18 @@ class OpenAIServingChat(OpenAIServing):
                     ):
                         # Chunked prefill case, don't return empty chunks
                         continue
+
+                    request_timeline_store.add_event(
+                        request_id=res.request_id,
+                        event_name="stream_chunk",
+                        start_time=timeline_now(),
+                        metadata={"tokens": len(output.token_ids)},
+                    )
+                    request_timeline_store.append_output(
+                        res.request_id,
+                        delta_text,
+                        finished=output.finish_reason is not None,
+                    )
 
                     delta_message: DeltaMessage | None
 

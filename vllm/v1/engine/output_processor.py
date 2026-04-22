@@ -18,6 +18,8 @@ from vllm.outputs import (
     PoolingRequestOutput,
     RequestOutput,
 )
+from vllm.request_timeline import now as timeline_now
+from vllm.request_timeline import request_timeline_store
 from vllm.sampling_params import RequestOutputKind
 from vllm.tokenizers import TokenizerLike
 from vllm.tracing import (
@@ -606,6 +608,8 @@ class OutputProcessor:
                 # Ignore output for already-aborted request.
                 continue
 
+            output_processor_start = timeline_now()
+
             # 1) Compute stats for this iteration.
             self._update_stats_from_output(
                 req_state, engine_core_output, engine_core_timestamp, iteration_stats
@@ -675,6 +679,17 @@ class OutputProcessor:
                     )
                     if self.tracing_enabled:
                         self.do_tracing(engine_core_output, req_state, iteration_stats)
+
+            request_timeline_store.add_event(
+                request_id=req_id,
+                event_name="OutputProcessor",
+                start_time=output_processor_start,
+                end_time=timeline_now(),
+                metadata={
+                    "tokens": len(new_token_ids),
+                    "finished": finish_reason is not None,
+                },
+            )
 
         return OutputProcessorOutput(
             request_outputs=request_outputs,

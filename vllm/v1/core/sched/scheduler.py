@@ -32,6 +32,8 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
+from vllm.request_timeline import now as timeline_now
+from vllm.request_timeline import request_timeline_store
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
@@ -101,6 +103,9 @@ class Scheduler(SchedulerInterface):
         )
         self.prev_step_scheduled_req_ids: set[str] = set()
         self.memory_profiler_iteration = 0
+
+        # record schedule iteration
+        self.schedule_iteration = 0
 
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
@@ -338,6 +343,7 @@ class Scheduler(SchedulerInterface):
 
     def schedule(self) -> SchedulerOutput:
         self.memory_profiler_iteration += 1
+        self.schedule_iteration += 1
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
@@ -789,6 +795,9 @@ class Scheduler(SchedulerInterface):
                         EngineCoreEventType.SCHEDULED, scheduled_timestamp
                     )
                 if request.status == RequestStatus.WAITING:
+                    request_timeline_store.end_event(
+                        request_id, "scheduler_waiting", timestamp=timeline_now()
+                    )
                     scheduled_new_reqs.append(request)
                 elif request.status == RequestStatus.PREEMPTED:
                     scheduled_resumed_reqs.append(request)
@@ -927,6 +936,9 @@ class Scheduler(SchedulerInterface):
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
         return scheduler_output
+
+    def get_schedule_iteration(self) -> int:
+        return self.schedule_iteration
 
     def get_memory_profiler_state(self) -> dict[str, Any]:
         waiting_requests = len(self.waiting) + len(self.skipped_waiting)
@@ -1299,6 +1311,14 @@ class Scheduler(SchedulerInterface):
         num_nans_in_logits = model_runner_output.num_nans_in_logits
         kv_connector_output = model_runner_output.kv_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
+        for event in model_runner_output.timeline_events:
+            request_timeline_store.add_event(
+                request_id=event["request_id"],
+                event_name=event["stage"],
+                start_time=event["start_time"],
+                end_time=event["end_time"],
+                metadata=event.get("metadata"),
+            )
 
         perf_stats: PerfStats | None = None
         if self.perf_metrics and self.perf_metrics.is_enabled():
@@ -1735,6 +1755,13 @@ class Scheduler(SchedulerInterface):
                 request.streaming_queue = deque()
             self._enqueue_waiting_request(request)
             self.requests[request.request_id] = request
+            # record schedule waiting
+            request_timeline_store.start_event(
+                request.request_id,
+                event_name="scheduler_waiting",
+                timestamp=timeline_now(),
+            )
+            request_timeline_store.update_status(request.request_id, "waiting")
             if self.log_stats:
                 request.record_event(EngineCoreEventType.QUEUED)
 
@@ -1805,6 +1832,21 @@ class Scheduler(SchedulerInterface):
         self, request: Request, delay_free_blocks: bool = False
     ) -> dict[str, Any] | None:
         assert request.is_finished()
+
+        finish_time = timeline_now()
+        request_timeline_store.add_event(
+            request_id=request.request_id,
+            event_name="finish",
+            start_time=finish_time,
+        )
+        status = (
+            "finished"
+            if request.status == RequestStatus.FINISHED_STOPPED
+            else getattr(request.status, "name", str(request.status)).lower()
+        )
+        request_timeline_store.update_status(
+            request.request_id, status, timestamp=finish_time, finish=True
+        )
 
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
         self.encoder_cache_manager.free(request)

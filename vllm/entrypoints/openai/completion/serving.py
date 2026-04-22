@@ -37,6 +37,8 @@ from vllm.inputs.data import ProcessorInputs
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
+from vllm.request_timeline import now as timeline_now
+from vllm.request_timeline import request_timeline_store
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import merge_async_iterators
@@ -119,6 +121,8 @@ class OpenAIServingCompletion(OpenAIServing):
             - suffix (the language models we currently support do not support
             suffix)
         """
+        # here we begin our trace for this prompt
+        request_start_time = timeline_now()
         if request.stream and request.use_beam_search:
             return self.create_error_response(
                 "Streaming is not currently supported with beam search"
@@ -166,6 +170,23 @@ class OpenAIServingCompletion(OpenAIServing):
                 )
 
             request_id_item = f"{request_id}-{i}"
+            input_tokens = self._extract_prompt_len(engine_prompt)
+            prompt_text = self._extract_prompt_text(engine_prompt)
+            # add the request to timeline
+            request_timeline_store.add_request(
+                request_id_item,
+                timestamp=request_start_time,
+                prompt=prompt_text,
+                input_tokens=input_tokens,
+                status="created",
+            )
+            # record preprocess
+            request_timeline_store.add_event(
+                request_id=request_id_item,
+                event_name="preprocess",
+                start_time=request_start_time,
+                end_time=timeline_now(),
+            )
 
             self._log_inputs(
                 request_id_item,
@@ -380,6 +401,17 @@ class OpenAIServingCompletion(OpenAIServing):
                     previous_num_tokens[i] += len(output.token_ids)
                     finish_reason = output.finish_reason
                     stop_reason = output.stop_reason
+                    request_timeline_store.add_event(
+                        request_id=res.request_id,
+                        event_name="stream_chunk",
+                        start_time=timeline_now(),
+                        metadata={"tokens": len(output.token_ids)},
+                    )
+                    request_timeline_store.append_output(
+                        res.request_id,
+                        delta_text,
+                        finished=finish_reason is not None,
+                    )
 
                     self._raise_if_error(finish_reason, request_id)
 
