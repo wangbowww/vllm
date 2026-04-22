@@ -30,6 +30,8 @@ from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import renderer_from_config
 from vllm.renderers.inputs.preprocess import extract_prompt_components
+from vllm.request_timeline import request_timeline_store
+from vllm.request_timeline import now as timeline_now
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
@@ -303,7 +305,12 @@ class AsyncLLM(EngineClient):
         reasoning_ended: bool | None = None,
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
-
+        # start record InputProcessor
+        request_timeline_store.start_event(
+            request_id=request_id,
+            event_name="InputProcessor",
+            timestamp=timeline_now(),
+        )
         if self.errored:
             raise EngineDeadError()
 
@@ -371,6 +378,19 @@ class AsyncLLM(EngineClient):
             request.reasoning_ended = reasoning_ended
 
         self.input_processor.assign_request_id(request)
+        if (
+            request.external_req_id is not None
+            and request.external_req_id != request.request_id
+        ):
+            request_timeline_store.add_alias(
+                request.external_req_id, request.request_id
+            )
+        # ends record InputProcessor
+        request_timeline_store.end_event(
+            request_id=request_id,
+            event_name="InputProcessor",
+            timestamp=timeline_now(),
+        )
 
         # We start the output_handler on the first call to add_request() so
         # we can call __init__ before the event loop, which enables us
@@ -949,6 +969,9 @@ class AsyncLLM(EngineClient):
 
     async def get_memory_profiler_engine_state(self) -> dict[str, Any]:
         return await self.engine_core.call_utility_async("get_memory_profiler_state")
+
+    async def get_request_timeline_engine_snapshot(self) -> dict[str, Any]:
+        return await self.engine_core.call_utility_async("get_request_timeline_state")
 
     async def wait_for_requests_to_drain(self, drain_timeout: int = 300):
         """Wait for all requests to be drained."""

@@ -238,6 +238,10 @@ class SchedulerOutput:
     # preventing stale NaN/data from corrupting attention or SSM computation.
     new_block_ids_to_zero: list[int] | None = None
 
+    # Request-timeline batch sequence assigned by EngineCore before dispatch.
+    request_timeline_batch_id: int | None = None
+    request_timeline_scheduled_at: float | None = None
+
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
         return cls(

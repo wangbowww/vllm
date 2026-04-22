@@ -23,6 +23,8 @@ from vllm.config import VllmConfig
 from vllm.envs import VLLM_ENGINE_READY_TIMEOUT_S
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.request_timeline import now as timeline_now
+from vllm.request_timeline import request_timeline_store
 from vllm.tasks import SupportedTask
 from vllm.tracing import instrument
 from vllm.utils.async_utils import in_loop
@@ -1081,6 +1083,11 @@ class AsyncMPClient(MPClient):
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
         request.client_index = self.client_index
+        request_timeline_store.add_event(
+            request_id=request.request_id,
+            event_name="zmq_send",
+            start_time=timeline_now(),
+        )
         await self._send_input(EngineCoreRequestType.ADD, request)
         self._ensure_output_queue_task()
 
@@ -1322,6 +1329,11 @@ class DPAsyncMPClient(AsyncMPClient):
 
         request.current_wave = self.current_wave
         request.client_index = self.client_index
+        request_timeline_store.add_event(
+            request_id=request.request_id,
+            event_name="zmq_send",
+            start_time=timeline_now(),
+        )
 
         chosen_engine = self.get_core_engine_for_request(request)
         to_await = self._send_input(EngineCoreRequestType.ADD, request, chosen_engine)

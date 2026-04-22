@@ -225,6 +225,10 @@ class EngineClient(ABC):
         """Get scheduler-side memory profiler state."""
         raise NotImplementedError
 
+    async def get_request_timeline_engine_snapshot(self) -> dict[str, Any]:
+        """Get engine-side request timeline events."""
+        raise NotImplementedError
+
     async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         """Get supported tasks"""
         raise NotImplementedError

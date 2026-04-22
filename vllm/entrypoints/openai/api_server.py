@@ -199,6 +199,12 @@ def build_app(
 
     register_memory_profiler_routes(app, args)
 
+    from vllm.entrypoints.openai.request_timeline.api_router import (
+        attach_router as register_request_timeline_api_router,
+    )
+
+    register_request_timeline_api_router(app)
+
     from vllm.entrypoints.sagemaker.api_router import (
         attach_router as register_sagemaker_api_router,
     )

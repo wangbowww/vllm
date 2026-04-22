@@ -4,7 +4,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, NamedTuple, TypeAlias, TypeVar
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, TypeVar
 
 import numpy as np
 import torch
@@ -252,6 +252,9 @@ class ModelRunnerOutput:
 
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
+
+    # Request timeline events collected in worker/model-runner processes.
+    timeline_events: list[dict[str, Any]] = field(default_factory=list)
 
 
 # ModelRunnerOutput wrapper for async scheduling.

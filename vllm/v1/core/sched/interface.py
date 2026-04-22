@@ -241,3 +241,6 @@ class SchedulerInterface(ABC):
 
     def get_kv_connector(self) -> "KVConnectorBase_V1 | None":
         return None
+
+    def get_schedule_iteration(self) -> int:
+        raise NotImplementedError

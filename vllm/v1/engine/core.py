@@ -26,6 +26,8 @@ from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.request_timeline import now as timeline_now
+from vllm.request_timeline import request_timeline_store
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
@@ -387,6 +389,7 @@ class EngineCore:
         if not self.scheduler.has_requests():
             return {}, False
         scheduler_output = self.scheduler.schedule()
+        self._record_scheduled_timeline(scheduler_output)
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
         with (
@@ -405,6 +408,26 @@ class EngineCore:
         )
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
+
+    def _record_scheduled_timeline(self, scheduler_output: SchedulerOutput) -> None:
+        batch_id = self.scheduler.get_schedule_iteration()
+        scheduler_output.request_timeline_batch_id = batch_id
+        scheduled_at = timeline_now()
+        scheduler_output.request_timeline_scheduled_at = scheduled_at
+        for req_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
+            stage = "prefill" if num_tokens > 1 else "decode"
+            metadata: dict[str, Any] = {
+                "batch_id": batch_id,
+                "tokens": num_tokens,
+                "phase": stage,
+            }
+            request_timeline_store.add_event(
+                request_id=req_id,
+                event_name="scheduled_batch",
+                start_time=scheduled_at,
+                metadata=metadata,
+            )
+            request_timeline_store.update_status(req_id, "running")
 
     def post_step(self, model_executed: bool) -> None:
         # When using async scheduling we can't get draft token ids in advance,
@@ -445,6 +468,7 @@ class EngineCore:
         deferred_scheduler_output = None
         if self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule()
+            self._record_scheduled_timeline(scheduler_output)
             with self.log_error_detail(scheduler_output):
                 exec_future = self.model_executor.execute_model(
                     scheduler_output, non_block=True
@@ -703,6 +727,9 @@ class EngineCore:
 
     def get_memory_profiler_state(self) -> dict[str, Any]:
         return self.scheduler.get_memory_profiler_state()
+
+    def get_request_timeline_state(self) -> dict[str, Any]:
+        return request_timeline_store.snapshot()
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_executor.add_lora(lora_request)
@@ -1240,6 +1267,12 @@ class EngineCoreProc(EngineCore):
             req, request_wave = request
             if self._reject_add_in_shutdown(req):
                 return
+            # get req from EC queue
+            request_timeline_store.add_event(
+                request_id=req.request_id,
+                event_name="ECQueueGet",
+                start_time=timeline_now()
+            )
             self.add_request(req, request_wave)
         elif request_type == EngineCoreRequestType.ABORT:
             self.abort_requests(request)
@@ -1402,6 +1435,11 @@ class EngineCoreProc(EngineCore):
                     request: Any
                     if request_type == EngineCoreRequestType.ADD:
                         req: EngineCoreRequest = add_request_decoder.decode(data_frames)
+                        request_timeline_store.add_event(
+                            request_id=req.request_id,
+                            event_name="engine_recv",
+                            start_time=timeline_now(),
+                        )
                         try:
                             request = self.preprocess_add_request(req)
                         except Exception:
@@ -1419,6 +1457,12 @@ class EngineCoreProc(EngineCore):
 
                     # Push to input queue for core busy loop.
                     self.input_queue.put_nowait((request_type, request))
+                    # push the req into EC queue
+                    request_timeline_store.add_event(
+                        request_id=request.request_id,
+                        event_name="ECQueued",
+                        start_time=timeline_now()
+                    )
 
     def process_output_sockets(
         self,
