@@ -102,7 +102,6 @@ class Scheduler(SchedulerInterface):
             defaultdict(set) if include_finished_set else None
         )
         self.prev_step_scheduled_req_ids: set[str] = set()
-        self.memory_profiler_iteration = 0
 
         # record schedule iteration
         self.schedule_iteration = 0
@@ -342,7 +341,6 @@ class Scheduler(SchedulerInterface):
         return num_new_tokens
 
     def schedule(self) -> SchedulerOutput:
-        self.memory_profiler_iteration += 1
         self.schedule_iteration += 1
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -939,18 +937,6 @@ class Scheduler(SchedulerInterface):
 
     def get_schedule_iteration(self) -> int:
         return self.schedule_iteration
-
-    def get_memory_profiler_state(self) -> dict[str, Any]:
-        waiting_requests = len(self.waiting) + len(self.skipped_waiting)
-        return {
-            "timestamp": time.time(),
-            "iteration": self.memory_profiler_iteration,
-            "kv_cache_usage_fraction": float(self.kv_cache_manager.usage),
-            "running_requests": len(self.running),
-            "waiting_requests": waiting_requests,
-            "num_waiting_for_streaming_input": self.num_waiting_for_streaming_input,
-            "num_gpu_blocks": int(self.kv_cache_config.num_blocks),
-        }
 
     def _preempt_request(self, request: Request, timestamp: float) -> None:
         """Preempt a request and put it back to the waiting queue.

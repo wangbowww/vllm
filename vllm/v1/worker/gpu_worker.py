@@ -38,7 +38,6 @@ from vllm.distributed.parallel_state import (
 from vllm.distributed.weight_transfer import WeightTransferEngineFactory
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.memory_profiling.worker import WorkerMemoryProfiler
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.platforms import current_platform
 from vllm.profiler.wrapper import CudaProfilerWrapper, TorchProfilerWrapper
@@ -146,8 +145,6 @@ class Worker(WorkerBase):
         # so we have all the information needed for proper trace naming.
         self.profiler: Any | None = None
         self.profiler_config = vllm_config.profiler_config
-        self.memory_profiler_config = vllm_config.memory_profiler_config
-        self.memory_profiler: WorkerMemoryProfiler | None = None
 
         # Only validate profiler config is valid, don't instantiate yet
         if self.profiler_config.profiler not in ("torch", "cuda", None):
@@ -256,13 +253,6 @@ class Worker(WorkerBase):
 
             self.device = torch.device(f"cuda:{self.local_rank}")
             torch.accelerator.set_device_index(self.device)
-            if self.memory_profiler_config.enabled:
-                self.memory_profiler = WorkerMemoryProfiler(
-                    self.memory_profiler_config,
-                    rank=self.rank,
-                    local_rank=self.local_rank,
-                    device=self.device,
-                )
 
             current_platform.check_if_supports_dtype(self.model_config.dtype)
 
@@ -343,11 +333,6 @@ class Worker(WorkerBase):
             set_current_vllm_config(self.vllm_config),
         ):
             self.model_runner.load_model(load_dummy_weights=dummy_weights)
-        if self.memory_profiler is not None:
-            self.memory_profiler.record_model_weights(
-                self.model_runner.get_model(),
-                int(getattr(self.model_runner, "model_memory_usage", 0)),
-            )
 
         if dummy_weights:
             self.model_runner.setup_eplb_from_mapping(
@@ -569,8 +554,6 @@ class Worker(WorkerBase):
                 self.model_runner.initialize_kv_cache(kv_cache_config)
         else:
             self.model_runner.initialize_kv_cache(kv_cache_config)
-        if self.memory_profiler is not None:
-            self.memory_profiler.record_kv_cache_config(kv_cache_config)
 
         if self.model_config.enable_return_routed_experts:
             self.model_runner.init_routed_experts_capturer()
@@ -623,10 +606,6 @@ class Worker(WorkerBase):
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
             cuda_graph_memory_bytes = self.model_runner.capture_model()
-            if self.memory_profiler is not None:
-                self.memory_profiler.finalize_cuda_graph_capture(
-                    cuda_graph_memory_bytes
-                )
 
         # Compare actual vs estimated CUDA graph memory (if we did profiling)
         if (
@@ -840,8 +819,6 @@ class Worker(WorkerBase):
             )
 
         with self.annotate_profile(scheduler_output):
-            if self.memory_profiler is not None:
-                self.memory_profiler.record_scheduler_activity(scheduler_output)
             output = self.model_runner.execute_model(
                 scheduler_output, intermediate_tensors
             )
@@ -1042,20 +1019,9 @@ class Worker(WorkerBase):
             ensure_kv_transfer_shutdown()
         if self.profiler is not None:
             self.profiler.shutdown()
-        if self.memory_profiler is not None:
-            self.memory_profiler.shutdown()
 
         if weight_transfer_engine := getattr(self, "weight_transfer_engine", None):
             weight_transfer_engine.shutdown()
-
-    def get_memory_profiler_state(self) -> dict[str, Any]:
-        if self.memory_profiler is None:
-            return {
-                "enabled": False,
-                "worker_rank": self.rank,
-                "local_rank": self.local_rank,
-            }
-        return self.memory_profiler.collect_state()
 
     def elastic_ep_execute(self, execute_method: str, *args, **kwargs):
         return self.elastic_ep_executor.execute(execute_method, *args, **kwargs)

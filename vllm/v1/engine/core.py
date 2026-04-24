@@ -724,9 +724,6 @@ class EngineCore:
     def execute_dummy_batch(self):
         self.model_executor.execute_dummy_batch()
 
-    def get_memory_profiler_state(self) -> dict[str, Any]:
-        return self.scheduler.get_memory_profiler_state()
-
     def get_request_timeline_state(self) -> dict[str, Any]:
         return request_timeline_store.snapshot()
 

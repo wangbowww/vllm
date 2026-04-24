@@ -967,9 +967,6 @@ class AsyncLLM(EngineClient):
             method, timeout, args, kwargs
         )
 
-    async def get_memory_profiler_engine_state(self) -> dict[str, Any]:
-        return await self.engine_core.call_utility_async("get_memory_profiler_state")
-
     async def get_request_timeline_engine_snapshot(self) -> dict[str, Any]:
         return await self.engine_core.call_utility_async("get_request_timeline_state")
 
