@@ -45,7 +45,6 @@ from vllm.config import (
     KVTransferConfig,
     LoadConfig,
     LoRAConfig,
-    MemoryProfilerConfig,
     ModelConfig,
     MultiModalConfig,
     ObservabilityConfig,
