@@ -221,10 +221,6 @@ class EngineClient(ABC):
         """Perform a collective RPC call to the given path."""
         raise NotImplementedError
 
-    async def get_memory_profiler_engine_state(self) -> dict[str, Any]:
-        """Get scheduler-side memory profiler state."""
-        raise NotImplementedError
-
     async def get_request_timeline_engine_snapshot(self) -> dict[str, Any]:
         """Get engine-side request timeline events."""
         raise NotImplementedError
