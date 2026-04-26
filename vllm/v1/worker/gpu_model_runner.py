@@ -20,6 +20,8 @@ import torch.distributed
 import torch.nn as nn
 from tqdm import tqdm
 
+from vllm.ReqTimeline import _Event, RequestTimeline
+
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphStat, CUDAGraphWrapper
@@ -381,8 +383,7 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: ECConnectorOutput | None
     cudagraph_stats: CUDAGraphStat | None
     slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None
-    timeline_events: list[dict[str, Any]]
-
+    timeline_events: dict[str, list[_Event]]
 
 class GPUModelRunner(
     LoRAModelRunnerMixin, KVConnectorModelRunnerMixin, ECConnectorModelRunnerMixin
@@ -3575,6 +3576,12 @@ class GPUModelRunner(
                 scheduler_output.preempted_req_ids
             )
 
+        timeline_events: dict[str, list[_Event]] = {
+            req_id: []
+            for req_id in scheduler_output.num_scheduled_tokens
+        }
+        p_by_worker_start = RequestTimeline.time()
+
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         with (
             record_function_or_nullcontext("gpu_model_runner: preprocess"),
@@ -3638,7 +3645,7 @@ class GPUModelRunner(
                     scheduler_output.num_common_prefix_blocks,
                 )
 
-            cudagraph_decision_start = time.time()
+            cudagraph_match_start = RequestTimeline.time()
             (
                 cudagraph_mode,
                 batch_desc,
@@ -3654,36 +3661,7 @@ class GPUModelRunner(
                 num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
             )
 
-            cudagraph_decision_end = time.time()
-            batch_id = scheduler_output.request_timeline_batch_id
-            timeline_events: list[dict[str, Any]] = []
-
-            def make_timeline_metadata(req_id: str) -> dict[str, Any]:
-                return {
-                    "batch_id": batch_id,
-                    "batch_size": len(scheduler_output.num_scheduled_tokens),
-                    "tokens": scheduler_output.num_scheduled_tokens[req_id],
-                    "total_batch_tokens": (
-                        scheduler_output.total_num_scheduled_tokens
-                    ),
-                    "source": "worker",
-                }
-
-            timeline_events.extend(
-                {
-                    "request_id": req_id,
-                    "stage": "cudagraph_decision",
-                    "start_time": cudagraph_decision_start,
-                    "end_time": cudagraph_decision_end,
-                    "metadata": {
-                        **make_timeline_metadata(req_id),
-                        "cudagraph_mode": str(cudagraph_mode),
-                        "batch_descriptor": str(batch_desc),
-                        "should_ubatch": should_ubatch,
-                    },
-                }
-                for req_id in scheduler_output.num_scheduled_tokens
-            )
+            cudagraph_match_end = RequestTimeline.time()
 
             logger.debug(
                 "Running batch with cudagraph_mode: %s, batch_descriptor: %s, "
@@ -3794,6 +3772,8 @@ class GPUModelRunner(
             self.model_config.is_encoder_decoder and num_encoder_reqs > 0
         )
 
+        p_by_worker_end = RequestTimeline.time()
+
         # Run the model.
         # Use persistent buffers for CUDA graphs.
         # When spec decode is enabled, defer connector finalization
@@ -3886,20 +3866,60 @@ class GPUModelRunner(
                 logits = broadcasted["logits"]
 
         forward_end = time.time()
-        timeline_events.extend(
-            {
-                "request_id": req_id,
-                "stage": (
-                    "prefill"
-                    if scheduler_output.num_scheduled_tokens[req_id] > 1
-                    else "decode"
-                ),
-                "start_time": forward_start,
-                "end_time": forward_end,
-                "metadata": make_timeline_metadata(req_id),
-            }
-            for req_id in scheduler_output.num_scheduled_tokens
-        )
+        for req_id in scheduler_output.num_scheduled_tokens:
+            # worker_recv
+            timeline_events[req_id].append(
+                _Event(
+                    name="worker_recv",
+                    start_time=p_by_worker_start,
+                    end_time=p_by_worker_start
+                )
+            )
+            # p_by_worker
+            timeline_events[req_id].append(
+                _Event(
+                    name="p_by_worker",
+                    start_time=p_by_worker_start,
+                    end_time=p_by_worker_end
+                )
+            )
+            # cudagraph_match
+            timeline_events[req_id].append(
+                _Event(
+                    name="cudagraph_match",
+                    start_time=cudagraph_match_start,
+                    end_time=cudagraph_match_end,
+                    metadata={
+                        "batch_size": len(scheduler_output.num_scheduled_tokens),
+                        "tokens": scheduler_output.num_scheduled_tokens[req_id],
+                        "total_batch_tokens": (
+                            scheduler_output.total_num_scheduled_tokens
+                        ),
+                        "cudagraph_mode": str(cudagraph_mode),
+                        "batch_descriptor": str(batch_desc),
+                        "should_ubatch": should_ubatch,
+                    }
+                )
+            )
+            # forward(prefill/decode)
+            timeline_events[req_id].append(
+                _Event(
+                    name=(
+                        "prefill"
+                        if scheduler_output.num_scheduled_tokens[req_id] > 1
+                        else "decode"
+                    ),
+                    start_time=forward_start,
+                    end_time=forward_end,
+                    metadata={
+                        "batch_size": len(scheduler_output.num_scheduled_tokens),
+                        "tokens": scheduler_output.num_scheduled_tokens[req_id],
+                        "total_batch_tokens": (
+                            scheduler_output.total_num_scheduled_tokens
+                        ),
+                    }
+                )
+            )
 
         self.execute_model_state = ExecuteModelState(
             scheduler_output,
@@ -3912,7 +3932,7 @@ class GPUModelRunner(
             ec_connector_output,
             cudagraph_stats,
             slot_mappings,
-            timeline_events,
+            timeline_events
         )
         self.kv_connector_output = kv_connector_output
         return None
@@ -3951,7 +3971,7 @@ class GPUModelRunner(
             ec_connector_output,
             cudagraph_stats,
             slot_mappings,
-            timeline_events,
+            timeline_events
         ) = self.execute_model_state
         # Clear ephemeral state.
         self.execute_model_state = None
@@ -3962,29 +3982,25 @@ class GPUModelRunner(
                 scheduler_output, grammar_output, self.input_batch, logits
             )
 
-        sample_start = time.time()
+        sample_start = RequestTimeline.time()
         with record_function_or_nullcontext("gpu_model_runner: sample"):
             sampler_output = self._sample(logits, spec_decode_metadata)
-        sample_end = time.time()
-        batch_id = scheduler_output.request_timeline_batch_id
-        timeline_events.extend(
-            {
-                "request_id": req_id,
-                "stage": "sample",
-                "start_time": sample_start,
-                "end_time": sample_end,
-                "metadata": {
-                    "batch_id": batch_id,
-                    "batch_size": len(scheduler_output.num_scheduled_tokens),
-                    "tokens": scheduler_output.num_scheduled_tokens[req_id],
-                    "total_batch_tokens": (
-                        scheduler_output.total_num_scheduled_tokens
-                    ),
-                    "source": "worker",
-                },
-            }
-            for req_id in scheduler_output.num_scheduled_tokens
-        )
+        sample_end = RequestTimeline.time()
+        for req_id in scheduler_output.num_scheduled_tokens:
+            timeline_events[req_id].append(
+                _Event(
+                    name="sample",
+                    start_time=sample_start,
+                    end_time=sample_end,
+                    metadata={
+                        "batch_size": len(scheduler_output.num_scheduled_tokens),
+                        "tokens": scheduler_output.num_scheduled_tokens[req_id],
+                        "total_batch_tokens": (
+                            scheduler_output.total_num_scheduled_tokens
+                        )
+                    }
+                )
+            )
 
         self._update_states_after_model_execute(
             sampler_output.sampled_token_ids, scheduler_output

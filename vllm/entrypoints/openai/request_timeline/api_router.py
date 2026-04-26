@@ -9,75 +9,56 @@ from typing import Any
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from vllm.request_timeline import request_timeline_store
+from vllm.ReqTimeline import requestTimeline, RequestTimeline
 
 router = APIRouter()
 
 
-def _merge_snapshots(frontend: dict[str, Any], engine: dict[str, Any] | None) -> dict:
-    records: dict[str, dict[str, Any]] = {}
-    alias_to_request_id: dict[str, str] = {}
+def _event_sort_key(event: dict[str, Any]) -> tuple[float, float]:
+    start_time = event.get("start_time")
+    end_time = event.get("end_time")
+    start_key = start_time if start_time is not None else float("inf")
+    end_key = end_time if end_time is not None else start_key
+    return start_key, end_key
 
-    def add(snapshot: dict[str, Any], source: str) -> None:
-        for record in snapshot.get("requests", []):
-            request_id = record["request_id"]
-            aliases = [request_id, *record.get("aliases", [])]
-            request_id = next(
-                (
-                    alias_to_request_id[alias]
-                    for alias in aliases
-                    if alias in alias_to_request_id
-                ),
-                request_id,
-            )
-            merged = records.setdefault(
-                request_id,
-                {
-                    **record,
-                    "request_id": request_id,
-                    "events": [],
-                    "sources": [],
-                },
-            )
-            merged_aliases = merged.setdefault("aliases", [])
-            for alias in aliases:
-                alias_to_request_id[alias] = request_id
-                if alias != request_id and alias not in merged_aliases:
-                    merged_aliases.append(alias)
-            merged["sources"].append(source)
-            merged["arrival_time"] = min(
-                merged.get("arrival_time") or record["arrival_time"],
-                record["arrival_time"],
-            )
-            finish_time = record.get("finish_time")
-            if finish_time is not None:
-                merged["finish_time"] = max(
-                    merged.get("finish_time") or finish_time, finish_time
-                )
-            if record.get("prompt") and not merged.get("prompt"):
-                merged["prompt"] = record["prompt"]
-            if merged.get("input_tokens") is None:
-                merged["input_tokens"] = record.get("input_tokens")
-            if record.get("output"):
-                merged["output"] = record["output"]
-            if record.get("status") == "finished":
-                merged["status"] = "finished"
-            elif merged.get("status") != "finished":
-                merged["status"] = record.get("status", merged.get("status"))
-            for event in record.get("events", []):
-                merged["events"].append({**event, "source": source})
 
-    add(frontend, "frontend")
-    if engine:
-        add(engine, "engine")
+def _state_to_response(state: dict[str, Any], snapshot_time: float) -> dict[str, Any]:
+    req_ids = set(state.get("reqs_info", {}))
+    req_ids.update(state.get("req_to_events", {}))
+    req_ids.update(state.get("req_to_events_ongoing", {}))
 
-    requests = sorted(records.values(), key=lambda item: item.get("arrival_time", 0))
+    requests = []
+    for req_id in req_ids:
+        reqinfo = dict(state.get("reqs_info", {}).get(req_id, {}))
+        finished_events = [
+            dict(event) for event in state.get("req_to_events", {}).get(req_id, [])
+        ]
+        events = finished_events
+        events.sort(key=_event_sort_key)
+
+        prompt = reqinfo.get("prompt")
+        output = reqinfo.get("output")
+        requests.append(
+            {
+                "request_id": req_id,
+                "arrival_time": reqinfo.get("arrival_time"),
+                "finish_time": reqinfo.get("finish_time"),
+                "prompt": prompt,
+                "output": output,
+                "input_tokens": len(prompt) if prompt is not None else None,
+                "output_tokens": len(output) if output is not None else None,
+                "latency": reqinfo.get("latency"),
+                "ttft": reqinfo.get("ttft"),
+                "status": reqinfo.get("status"),
+                "events": events,
+                "warning": state.get("warning_reqs", {}).get(req_id),
+            }
+        )
+
+    requests.sort(key=lambda item: item.get("arrival_time") or 0)
     return {
         "requests": requests,
-        "snapshot_time": max(
-            frontend.get("snapshot_time", 0),
-            (engine or {}).get("snapshot_time", 0),
-        ),
+        "snapshot_time": snapshot_time,
     }
 
 
@@ -85,7 +66,7 @@ async def _get_engine_snapshot(request: Request) -> dict[str, Any] | None:
     engine_client = getattr(request.app.state, "engine_client", None)
     if engine_client is None:
         return None
-    getter = getattr(engine_client, "get_request_timeline_engine_snapshot", None)
+    getter = getattr(engine_client, "get_engine_core_request_timeline_dict", None)
     if getter is None:
         return None
     try:
@@ -101,9 +82,10 @@ async def request_timeline_index() -> HTMLResponse:
 
 @router.get("/request-timeline/data", include_in_schema=False)
 async def request_timeline_data(request: Request) -> JSONResponse:
-    frontend = request_timeline_store.snapshot()
+    frontend = requestTimeline.export_state()
     engine = await _get_engine_snapshot(request)
-    return JSONResponse(_merge_snapshots(frontend, engine))
+    merged = requestTimeline.merge(engine)
+    return JSONResponse(_state_to_response(merged, snapshot_time=RequestTimeline.time()))
 
 
 def attach_router(app: FastAPI) -> None:
@@ -260,21 +242,22 @@ def _render_html() -> str:
   <div id="tooltip" class="tooltip"></div>
   <script>
     const COLORS = {{
-      preprocess: 'var(--ingress)',
-      InputProcessor: 'var(--ingress)',
-      zmq_send: 'var(--ingress)',
-      engine_recv: 'var(--ingress)',
-      scheduler_waiting: 'var(--queue)',
-      scheduled_batch: 'var(--batch)',
-      cudagraph_decision: 'var(--batch)',
+      p_by_client: 'var(--ingress)',
+      EC_recv: 'var(--ingress)',
+      p_by_EC: 'var(--ingress)',
+      waiting: 'var(--queue)',
+      selected_to_batch: 'var(--batch)',
+      worker_recv: 'var(--batch-queue)',
+      p_by_worker: 'var(--batch-queue)',
+      cudagraph_match: 'var(--batch)',
       prefill: 'var(--prefill)',
       decode: 'var(--decode)',
       sample: 'var(--sample)',
-      OutputProcessor: 'var(--sample)',
-      stream_chunk: 'var(--stream)',
+      EC_get_out: 'var(--sample)',
+      client_recv_out: 'var(--stream)',
       finish: 'var(--finish)',
     }};
-    const STAGES = ['preprocess', 'InputProcessor', 'zmq_send', 'engine_recv', 'scheduler_waiting', 'scheduled_batch', 'cudagraph_decision', 'prefill', 'decode', 'sample', 'OutputProcessor', 'stream_chunk', 'finish'];
+    const STAGES = ['p_by_client', 'EC_recv', 'p_by_EC', 'waiting', 'selected_to_batch', 'worker_recv', 'p_by_worker', 'cudagraph_match', 'prefill', 'decode', 'sample', 'EC_get_out', 'client_recv_out', 'finish'];
     const TIME_SCALE_PX_PER_S = 18000;
     const INSTANT_EVENT_WIDTH = 3;
     const MIN_DURATION_WIDTH = 1;
@@ -298,22 +281,17 @@ def _render_html() -> str:
     }}
     function metrics(req) {{
       const chunks = (req.events || [])
-        .filter(e => e.stage === 'stream_chunk')
+        .filter(e => e.name === 'client_recv_out')
         .sort((a, b) => a.start_time - b.start_time);
-      const tokenChunks = chunks.filter(e => Number(e.metadata?.tokens || 0) > 0);
-      const firstToken = (tokenChunks[0] || chunks[0])?.start_time || null;
-      const totalTokens = tokenChunks.reduce((sum, e) => sum + Number(e.metadata?.tokens || 0), 0);
-      const inputTokens = Math.max(
-        0,
-        Number(req.input_tokens || 0),
-        ...(req.events || []).map(e => Number(e.metadata?.input_tokens || 0))
-      );
-      const total = req.finish_time ? req.finish_time - req.arrival_time : null;
-      const ttft = firstToken ? firstToken - req.arrival_time : null;
-      const tpot = firstToken && req.finish_time && totalTokens > 1
-        ? (req.finish_time - firstToken) / (totalTokens - 1)
-        : null;
-      return {{ total, ttft, tpot, totalTokens, inputTokens }};
+      const firstToken = chunks[0]?.start_time || null;
+      const total = req.latency ?? (req.finish_time ? req.finish_time - req.arrival_time : null);
+      const ttft = req.ttft ?? (firstToken ? firstToken - req.arrival_time : null);
+      return {{
+        total,
+        ttft,
+        inputTokens: req.input_tokens,
+        outputTokens: req.output_tokens,
+      }};
     }}
     function esc(s) {{
       return String(s ?? '').replace(/[&<>"']/g, c => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]));
@@ -321,13 +299,12 @@ def _render_html() -> str:
     function tooltipText(e) {{
       const meta = e.metadata || {{}};
       const lines = [
-        `stage: ${{e.stage}}`,
+        `stage: ${{e.name}}`,
         `start: ${{fmt(e.start_time)}}`,
         `end: ${{fmt(e.end_time)}}`,
-        `duration: ${{meta.instant ? 'instant' : dur(e.start_time, e.end_time)}}`,
+        `duration: ${{dur(e.start_time, e.end_time)}}`,
       ];
       if (meta.batch_id !== undefined && meta.batch_id !== null) lines.push(`batch: #${{meta.batch_id}}`);
-      if (meta.phase) lines.push(`phase: ${{meta.phase}}`);
       if (meta.tokens !== undefined) lines.push(`tokens: ${{meta.tokens}}`);
       if (meta.batch_size !== undefined) lines.push(`batch size: ${{meta.batch_size}}`);
       if (meta.total_batch_tokens !== undefined) lines.push(`batch tokens: ${{meta.total_batch_tokens}}`);
@@ -398,11 +375,10 @@ def _render_html() -> str:
           <div class="field"><div class="label">Arrival</div><div class="value">${{fmt(req.arrival_time)}}</div></div>
           <div class="field"><div class="label">Finish</div><div class="value">${{fmt(req.finish_time)}}</div></div>
           <div class="field"><div class="label">Status</div><div class="value">${{esc(req.status)}}</div></div>
-          <div class="field"><div class="label">Input Tokens</div><div class="value">${{m.inputTokens || '-'}}</div></div>
-          <div class="field"><div class="label">Output Tokens</div><div class="value">${{m.totalTokens || '-'}}</div></div>
+          <div class="field"><div class="label">Input Tokens</div><div class="value">${{m.inputTokens ?? '-'}}</div></div>
+          <div class="field"><div class="label">Output Tokens</div><div class="value">${{m.outputTokens ?? '-'}}</div></div>
           <div class="field"><div class="label">Total Latency</div><div class="value">${{ms(m.total)}}</div></div>
           <div class="field"><div class="label">TTFT</div><div class="value">${{ms(m.ttft)}}</div></div>
-          <div class="field"><div class="label">TPOT</div><div class="value">${{ms(m.tpot)}}</div></div>
         </div>
         <div class="text-grid">
           <pre>${{esc(req.prompt || '')}}</pre>
@@ -443,10 +419,10 @@ def _render_html() -> str:
         svg += `<line x1="${{left}}" y1="${{y + 12}}" x2="${{width - 24}}" y2="${{y + 12}}" stroke="#2a3038"/>`;
       }}
       for (const e of events) {{
-        const stage = STAGES.includes(e.stage) ? e.stage : 'finish';
+        const stage = STAGES.includes(e.name) ? e.name : 'finish';
         const y = rows.get(stage) + 3;
         const sx = x(e.start_time);
-        const instant = e.metadata?.instant || !e.end_time || e.end_time <= e.start_time;
+        const instant = !e.end_time || e.end_time <= e.start_time;
         const ex = x(instant ? e.start_time : e.end_time);
         const w = instant
           ? INSTANT_EVENT_WIDTH

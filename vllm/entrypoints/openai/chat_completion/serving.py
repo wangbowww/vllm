@@ -14,6 +14,8 @@ import regex as re
 from fastapi import Request
 from partial_json_parser.core.options import Allow
 
+from vllm.ReqTimeline import RequestTimeline, requestTimeline
+
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
@@ -69,8 +71,6 @@ from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.parser import ParserManager
 from vllm.reasoning import ReasoningParser
 from vllm.renderers import ChatParams
-from vllm.request_timeline import now as timeline_now
-from vllm.request_timeline import request_timeline_store
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
@@ -222,7 +222,6 @@ class OpenAIServingChat(OpenAIServing):
         for the API specification. This API mimics the OpenAI
         Chat Completion API.
         """
-        request_start_time = timeline_now()
         # Streaming response
         tokenizer = self.renderer.tokenizer
         assert tokenizer is not None
@@ -246,7 +245,7 @@ class OpenAIServingChat(OpenAIServing):
         request_id = (
             f"chatcmpl-{self._base_request_id(raw_request, request.request_id)}"
         )
-
+        created_time = RequestTimeline.time()
         request_metadata = RequestResponseMetadata(request_id=request_id)
         if raw_request:
             raw_request.state.request_metadata = request_metadata
@@ -269,22 +268,18 @@ class OpenAIServingChat(OpenAIServing):
             sub_request_id = (
                 request_id if len(engine_prompts) == 1 else f"{request_id}_{i}"
             )
-            input_tokens = len(prompt_token_ids or [])
             prompt_text = self._extract_prompt_text(engine_prompt)
             # add the request to timeline
-            request_timeline_store.add_request(
-                sub_request_id,
-                timestamp=request_start_time,
-                prompt=prompt_text,
-                input_tokens=input_tokens,
-                status="created",
+            requestTimeline.add_request(
+                req_id=sub_request_id,
+                arrival_time=created_time
             )
-            # record preprocess
-            request_timeline_store.add_event(
-                request_id=sub_request_id,
-                event_name="preprocess",
-                start_time=request_start_time,
-                end_time=timeline_now(),
+            # record p_by_client
+            requestTimeline.start_event(
+                req_id=sub_request_id,
+                event_name="p_by_client",
+                start_time=created_time,
+                metadata={"prompt": prompt_text}
             )
 
             max_tokens = get_max_tokens(
@@ -760,17 +755,30 @@ class OpenAIServingChat(OpenAIServing):
                         # Chunked prefill case, don't return empty chunks
                         continue
 
-                    request_timeline_store.add_event(
-                        request_id=res.request_id,
-                        event_name="stream_chunk",
-                        start_time=timeline_now(),
-                        metadata={"tokens": len(output.token_ids)},
+                    ts = RequestTimeline.time()
+                    requestTimeline.add_event(
+                        req_id=res.request_id,
+                        event_name="client_recv_out",
+                        start_time=ts,
+                        end_time=ts,
+                        metadata={
+                            "output": delta_text,
+                            "get_output_time": ts,
+                        },
                     )
-                    request_timeline_store.append_output(
-                        res.request_id,
-                        delta_text,
-                        finished=output.finish_reason is not None,
-                    )
+                    finish_reason = output.finish_reason
+                    if finish_reason is not None:
+                        requestTimeline.add_event(
+                            req_id=res.request_id,
+                            event_name="finish",
+                            start_time=ts,
+                            end_time=ts,
+                            metadata={
+                                "finish_reason": finish_reason,
+                                "finish_time": ts,
+                                "status": "finished"
+                            }
+                        )
 
                     delta_message: DeltaMessage | None
 

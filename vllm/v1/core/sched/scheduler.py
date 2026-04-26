@@ -9,6 +9,8 @@ from typing import Any
 
 import numpy as np
 
+from vllm.ReqTimeline import RequestTimeline, requestTimeline
+
 from vllm import envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig
@@ -32,8 +34,6 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
-from vllm.request_timeline import now as timeline_now
-from vllm.request_timeline import request_timeline_store
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
@@ -793,9 +793,6 @@ class Scheduler(SchedulerInterface):
                         EngineCoreEventType.SCHEDULED, scheduled_timestamp
                     )
                 if request.status == RequestStatus.WAITING:
-                    request_timeline_store.end_event(
-                        request_id, "scheduler_waiting", timestamp=timeline_now()
-                    )
                     scheduled_new_reqs.append(request)
                 elif request.status == RequestStatus.PREEMPTED:
                     scheduled_resumed_reqs.append(request)
@@ -1297,14 +1294,16 @@ class Scheduler(SchedulerInterface):
         num_nans_in_logits = model_runner_output.num_nans_in_logits
         kv_connector_output = model_runner_output.kv_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
-        for event in model_runner_output.timeline_events:
-            request_timeline_store.add_event(
-                request_id=event["request_id"],
-                event_name=event["stage"],
-                start_time=event["start_time"],
-                end_time=event["end_time"],
-                metadata=event.get("metadata"),
-            )
+        for req_id in model_runner_output.timeline_events:
+            for event in model_runner_output.timeline_events[req_id]:
+                if event.name is not None and event.start_time is not None and event.end_time is not None:
+                    requestTimeline.add_event(
+                        req_id=req_id,
+                        event_name=event.name,
+                        start_time=event.start_time,
+                        end_time=event.end_time,
+                        metadata=event.metadata
+                    )
 
         perf_stats: PerfStats | None = None
         if self.perf_metrics and self.perf_metrics.is_enabled():
@@ -1741,13 +1740,19 @@ class Scheduler(SchedulerInterface):
                 request.streaming_queue = deque()
             self._enqueue_waiting_request(request)
             self.requests[request.request_id] = request
-            # record schedule waiting
-            request_timeline_store.start_event(
-                request.request_id,
-                event_name="scheduler_waiting",
-                timestamp=timeline_now(),
+            
+            ts = RequestTimeline.time()
+            requestTimeline.end_event(
+                req_id=request.request_id,
+                event_name="p_by_EC",
+                end_time=ts
             )
-            request_timeline_store.update_status(request.request_id, "waiting")
+            requestTimeline.start_event(
+                req_id=request.request_id,
+                event_name="waiting",
+                start_time=ts,
+                metadata={"status": "waiting"}
+            )
             if self.log_stats:
                 request.record_event(EngineCoreEventType.QUEUED)
 
@@ -1819,20 +1824,21 @@ class Scheduler(SchedulerInterface):
     ) -> dict[str, Any] | None:
         assert request.is_finished()
 
-        finish_time = timeline_now()
-        request_timeline_store.add_event(
-            request_id=request.request_id,
-            event_name="finish",
-            start_time=finish_time,
-        )
-        status = (
-            "finished"
-            if request.status == RequestStatus.FINISHED_STOPPED
-            else getattr(request.status, "name", str(request.status)).lower()
-        )
-        request_timeline_store.update_status(
-            request.request_id, status, timestamp=finish_time, finish=True
-        )
+        finish_time = RequestTimeline.time()
+        if request.status != RequestStatus.FINISHED_STOPPED:
+            requestTimeline.add_event(
+                req_id=request.request_id,
+                event_name="finish",
+                start_time=finish_time,
+                end_time=finish_time,
+                metadata={
+                    "finish_time": finish_time,
+                    "status": "finished",
+                    "final_status": getattr(
+                        request.status, "name", str(request.status)
+                    ).lower(),
+                },
+            )
 
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
         self.encoder_cache_manager.free(request)

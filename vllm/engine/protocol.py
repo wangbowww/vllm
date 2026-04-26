@@ -221,7 +221,7 @@ class EngineClient(ABC):
         """Perform a collective RPC call to the given path."""
         raise NotImplementedError
 
-    async def get_request_timeline_engine_snapshot(self) -> dict[str, Any]:
+    async def get_engine_core_request_timeline_engine_dict(self) -> dict[str, Any]:
         """Get engine-side request timeline events."""
         raise NotImplementedError
 

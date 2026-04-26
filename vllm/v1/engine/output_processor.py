@@ -10,6 +10,8 @@ from typing import Any, cast
 import numpy as np
 import torch
 
+from vllm.ReqTimeline import RequestTimeline, requestTimeline
+
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (
     STREAM_FINISHED,
@@ -18,8 +20,6 @@ from vllm.outputs import (
     PoolingRequestOutput,
     RequestOutput,
 )
-from vllm.request_timeline import now as timeline_now
-from vllm.request_timeline import request_timeline_store
 from vllm.sampling_params import RequestOutputKind
 from vllm.tokenizers import TokenizerLike
 from vllm.tracing import (
@@ -598,17 +598,15 @@ class OutputProcessor:
         If you need to touch every element of the batch, do it from
         within the loop below.
         """
-
         request_outputs: list[RequestOutput | PoolingRequestOutput] = []
         reqs_to_abort: list[str] = []
         for engine_core_output in engine_core_outputs:
+            EC_get_out_start = RequestTimeline.time()
             req_id = engine_core_output.request_id
             req_state = self.request_states.get(req_id)
             if req_state is None:
                 # Ignore output for already-aborted request.
                 continue
-
-            output_processor_start = timeline_now()
 
             # 1) Compute stats for this iteration.
             self._update_stats_from_output(
@@ -680,15 +678,11 @@ class OutputProcessor:
                     if self.tracing_enabled:
                         self.do_tracing(engine_core_output, req_state, iteration_stats)
 
-            request_timeline_store.add_event(
-                request_id=req_id,
-                event_name="OutputProcessor",
-                start_time=output_processor_start,
-                end_time=timeline_now(),
-                metadata={
-                    "tokens": len(new_token_ids),
-                    "finished": finish_reason is not None,
-                },
+            requestTimeline.add_event(
+                req_id=req_id,
+                event_name="EC_get_out",
+                start_time=EC_get_out_start,
+                end_time=RequestTimeline.time(),
             )
 
         return OutputProcessorOutput(

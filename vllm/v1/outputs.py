@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, TypeVar
 import numpy as np
 import torch
 
+from vllm.ReqTimeline import _Event
+
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -254,7 +256,7 @@ class ModelRunnerOutput:
     cudagraph_stats: CUDAGraphStat | None = None
 
     # Request timeline events collected in worker/model-runner processes.
-    timeline_events: list[dict[str, Any]] = field(default_factory=list)
+    timeline_events: dict[str, list[_Event]] = field(default_factory=dict)
 
 
 # ModelRunnerOutput wrapper for async scheduling.
