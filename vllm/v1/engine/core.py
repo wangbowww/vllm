@@ -389,7 +389,6 @@ class EngineCore:
         if not self.scheduler.has_requests():
             return {}, False
         scheduler_output = self.scheduler.schedule()
-        self._record_selected_to_batch(scheduler_output)
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
         with (
@@ -408,28 +407,6 @@ class EngineCore:
         )
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
-
-    def _record_selected_to_batch(self, scheduler_output: SchedulerOutput) -> None:
-        batch_id = self.scheduler.get_schedule_iteration()
-        scheduled_at = RequestTimeline.time()
-        for req_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
-            metadata: dict[str, Any] = {
-                "batch_id": batch_id,
-                "tokens": num_tokens,
-                "status": "running"
-            }
-            requestTimeline.end_event(
-                req_id=req_id,
-                event_name="waiting",
-                end_time=scheduled_at,
-            )
-            requestTimeline.add_event(
-                req_id=req_id,
-                event_name="selected_to_batch",
-                start_time=scheduled_at,
-                end_time=scheduled_at,
-                metadata=metadata,
-            )
 
     def post_step(self, model_executed: bool) -> None:
         # When using async scheduling we can't get draft token ids in advance,
@@ -470,7 +447,6 @@ class EngineCore:
         deferred_scheduler_output = None
         if self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule()
-            self._record_selected_to_batch(scheduler_output)
             with self.log_error_detail(scheduler_output):
                 exec_future = self.model_executor.execute_model(
                     scheduler_output, non_block=True

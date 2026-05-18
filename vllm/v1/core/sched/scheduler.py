@@ -794,8 +794,18 @@ class Scheduler(SchedulerInterface):
                     )
                 if request.status == RequestStatus.WAITING:
                     scheduled_new_reqs.append(request)
+                    requestTimeline.end_event(
+                        req_id=request.request_id,
+                        event_name="waiting",
+                        end_time=scheduled_timestamp,
+                    )
                 elif request.status == RequestStatus.PREEMPTED:
                     scheduled_resumed_reqs.append(request)
+                    requestTimeline.end_event(
+                        req_id=request.request_id,
+                        event_name="preempted",
+                        end_time=scheduled_timestamp,
+                    )
                 else:
                     raise RuntimeError(f"Invalid request status: {request.status}")
 
@@ -807,6 +817,17 @@ class Scheduler(SchedulerInterface):
                 num_scheduled_tokens[request_id] = num_new_tokens
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
+                metadata: dict[str, Any] = {
+                    "batch_id": self.schedule_iteration,
+                    "status": "running"
+                }
+                requestTimeline.add_event(
+                    req_id=request.request_id,
+                    event_name="selected_to_batch",
+                    start_time=scheduled_timestamp,
+                    end_time=scheduled_timestamp,
+                    metadata=metadata,
+                )
                 request.num_computed_tokens = num_computed_tokens
                 # Count the number of prefix cached tokens.
                 if request.num_cached_tokens < 0:
@@ -955,6 +976,12 @@ class Scheduler(SchedulerInterface):
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
 
         # Put the request back to the waiting queue.
+        requestTimeline.start_event(
+            req_id = request.request_id,
+            event_name = "preempted",
+            start_time = timestamp,
+            
+        )
         self.waiting.prepend_request(request)
 
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
@@ -1807,6 +1834,19 @@ class Scheduler(SchedulerInterface):
         # Second pass: set status and free requests
         for request in valid_requests:
             delay_free_blocks = False
+            timeline_end_time = RequestTimeline.time()
+            if request.status == RequestStatus.WAITING:
+                requestTimeline.end_event(
+                    req_id=request.request_id,
+                    event_name="waiting",
+                    end_time=timeline_end_time,
+                )
+            elif request.status == RequestStatus.PREEMPTED:
+                requestTimeline.end_event(
+                    req_id=request.request_id,
+                    event_name="preempted",
+                    end_time=timeline_end_time,
+                )
             if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                 delay_free_blocks = (
                     request.request_id not in self.finished_recving_kv_req_ids
